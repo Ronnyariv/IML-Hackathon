@@ -22,6 +22,16 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+from model import BikeDemandModel, aggregate_demand, fill_zeros
+
+TRAIN_CSV = "/Users/mikasagi/Desktop/IML/Hackathon/IML-Hackathon/dataset/local_train_set.csv"
+USE_ZEROS = False
+
+df = pd.read_csv(TRAIN_CSV)
+demand = aggregate_demand(df)
+
+if USE_ZEROS:
+    demand = fill_zeros(demand)
 
 
 DATA_ROOT = Path("../../dataset")
