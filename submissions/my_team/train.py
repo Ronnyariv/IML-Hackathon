@@ -37,6 +37,7 @@ if USE_ZEROS:
 DATA_ROOT = Path("../../dataset")
 TRAIN_CSV = DATA_ROOT / "train_set.csv"
 OUTPUT_WEIGHTS = "weights.joblib"
+"""note"""
 
 
 def main() -> None:
