@@ -62,23 +62,30 @@ class BikeDemandModel:
         # Bike demand cannot be negative.
         return np.maximum(0.0, preds)
     
-    def aggregate_demand(df):
-        """Convert raw ride-level data into station-hour demand."""
-        df["hour_ts"] = pd.to_datetime(df["hour_ts"])
-        
-        demand = (
-            df.groupby(["city", "start_station_id", "hour_ts"])
-            .size()
-            .reset_index(name="demand")
-        )
-        return demand
-    
-    df = pd.read_csv("../../dataset/local_train_set.csv", low_memory=False)
+    def fill_zeros(demand):
+        """
+        For each (city, station), generate a row for every hour 
+        in that station's active date range, filling missing hours with demand=0.
+        """
+        filled_frames = []
 
-    demand = aggregate_demand(df)
+        for (city, station), group in demand.groupby(["city", "start_station_id"]):
+            # Full hourly range for this station
+            min_hour = group["hour_ts"].min()
+            max_hour = group["hour_ts"].max()
+            all_hours = pd.date_range(start=min_hour, end=max_hour, freq="h")
 
-    print(f"Total station-hour rows: {len(demand):,}")
-    print(f"\nDemand distribution:")
-    print(demand["demand"].describe())
-    print(f"\nRows per city:")
-    print(demand["city"].value_counts())
+            # Create a complete skeleton for this station
+            full = pd.DataFrame({
+                "city": city,
+                "start_station_id": station,
+                "hour_ts": all_hours,
+            })
+
+            # Merge with actual demand, filling missing hours with 0
+            full = full.merge(group[["hour_ts", "demand"]], on="hour_ts", how="left")
+            full["demand"] = full["demand"].fillna(0).astype(int)
+
+            filled_frames.append(full)
+
+        return pd.concat(filled_frames, ignore_index=True)
