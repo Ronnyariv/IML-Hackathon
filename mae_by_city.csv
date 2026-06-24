@@ -1,0 +1,4 @@
+model,city,n_rows,mae,rmse,mean_true_demand,mean_prediction,negative_predictions_before_clipping
+dummy_baseline,OVERALL,169338,98.652092,98.676423,1.348463,100.0,0.0
+dummy_baseline,city 1,92486,98.433049,98.459926,1.567967,100.0,
+dummy_baseline,city 2,76852,98.915695,98.936334,1.084305,100.0,
