@@ -54,9 +54,10 @@ def main() -> None:
     print("Building station-hour historical means...")
     station_means = build_station_hour_means(train_df)
     city_means = build_city_hour_means(train_df)
+    global_means = build_global_hour_means(train_df)
 
     print("Building features...")
-    X_train = build_features(train_df, medians, station_means, city_means)
+    X_train = build_features(train_df, medians, station_means, city_means, global_means)
     y_train = train_df["demand"]
 
     print("Preparing validation set for early stopping...")
@@ -64,9 +65,21 @@ def main() -> None:
     cleaned_val = clean_rides(raw_val)
     cleaned_val["hour_ts"] = pd.to_datetime(cleaned_val["hour_ts"])
     val_df = aggregate_demand(cleaned_val)
-    X_val = build_features(val_df, medians, station_means, city_means)
+    X_val = build_features(val_df, medians, station_means, city_means, global_means)
     y_val = val_df["demand"]
     X_val = X_val.reindex(columns=X_train.columns, fill_value=0)
+
+    # Compute city scale
+    city_scale = compute_city_scale(train_df)
+    print("City demand scales:")
+    print(city_scale)
+
+    # Normalize training target
+    scale_map = city_scale.set_index("city")["city_demand_scale"]
+    y_train_normalized = y_train / train_df["city"].map(scale_map).values
+
+    # Normalize validation target too
+    y_val_normalized = y_val / val_df["city"].map(scale_map).fillna(scale_map.mean()).values
 
     print(f"Training LightGBM on {len(X_train):,} station-hour examples...")
     model = lgb.LGBMRegressor(
@@ -79,8 +92,8 @@ def main() -> None:
         n_jobs=-1,
     )
     model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
+        X_train, y_train_normalized,  
+        eval_set=[(X_val, y_val_normalized)],  
         eval_metric="mae",
         callbacks=[lgb.early_stopping(50, verbose=True), lgb.log_evaluation(100)],
     )
@@ -95,11 +108,32 @@ def main() -> None:
         "medians": medians,
         "station_means": station_means,
         "city_means": city_means,
+        "global_means": global_means,
+        "city_scale": city_scale,              # ← add
         "feature_columns": list(X_train.columns),
     }
 
     joblib.dump(artifacts, OUTPUT_WEIGHTS)
     print(f"Saved {OUTPUT_WEIGHTS}")
+
+def compute_city_scale(train_df):
+    return (
+        train_df.groupby("city")["demand"]
+        .mean()
+        .reset_index()
+        .rename(columns={"demand": "city_demand_scale"})
+    )
+
+def build_global_hour_means(train_df):
+    df = train_df.copy()
+    df["hour_of_day"] = pd.to_datetime(df["hour_ts"]).dt.hour
+    df["day_of_week"] = pd.to_datetime(df["hour_ts"]).dt.dayofweek
+    return (
+        df.groupby(["hour_of_day", "day_of_week"])["demand"]
+        .mean()
+        .reset_index()
+        .rename(columns={"demand": "global_hour_mean"})
+    )
 
 if __name__ == "__main__":
     main()
