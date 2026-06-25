@@ -4,7 +4,7 @@ import joblib
 import pandas as pd
 import matplotlib.pyplot as plt
 import lightgbm as lgb
-from preprocessing import clean_rides, aggregate_demand, compute_feature_medians, build_features
+from preprocessing import clean_rides, aggregate_demand, compute_feature_medians, build_features, fill_zeros
 from model import build_station_hour_means
 
 DATA_ROOT = Path("../../dataset")
@@ -13,6 +13,7 @@ VAL_CSV = DATA_ROOT / "local_validation_set.csv"
 CITY3_CSV = DATA_ROOT / "city3_generalization.csv"
 OUTPUT_WEIGHTS = "weights.joblib"
 TRAINING_WEEKS = 8
+USE_ZEROS = True
 
 def take_first_n_weeks(city_df, n_weeks):
     min_date = city_df["hour_ts"].min()
@@ -70,6 +71,36 @@ def main() -> None:
     print("Aggregating demand...")
     train_df = aggregate_demand(cleaned)
 
+    # 1. Compute city scale BEFORE zeros
+    city_scale = compute_city_scale(train_df)
+    print("City demand scales (before zeros):")
+    print(city_scale)
+
+    # 2. Add city3 scale from small history
+    print("Computing city3 scale from small history...")
+    raw_city3 = pd.read_csv(CITY3_CSV, low_memory=False)
+    cleaned_city3 = clean_rides(raw_city3)
+    cleaned_city3["hour_ts"] = pd.to_datetime(cleaned_city3["hour_ts"])
+    train_df_city3 = aggregate_demand(cleaned_city3)
+    city3_scale = train_df_city3["demand"].mean()
+    print(f"City3 demand scale: {city3_scale:.4f}")
+    city3_row = pd.DataFrame([{"city": "city 3", "city_demand_scale": city3_scale}])
+    city_scale = pd.concat([city_scale, city3_row], ignore_index=True)
+    print("Updated city demand scales:")
+    print(city_scale)
+
+    # 3. Compute means BEFORE zeros
+    print("Building station-hour historical means...")
+    station_means = build_station_hour_means(train_df)
+    city_means = build_city_hour_means(train_df)
+    global_means = build_global_hour_means(train_df)
+
+    # 4. Now fill zeros
+    if USE_ZEROS:
+        print("Filling zero-demand hours...")
+        train_df = fill_zeros(train_df)
+
+    # ← means AFTER zeros
     print("Building station-hour historical means...")
     station_means = build_station_hour_means(train_df)
     city_means = build_city_hour_means(train_df)
@@ -87,11 +118,6 @@ def main() -> None:
     X_val = build_features(val_df, medians, station_means, city_means, global_means)
     y_val = val_df["demand"]
     X_val = X_val.reindex(columns=X_train.columns, fill_value=0)
-
-    # Compute city scales
-    city_scale = compute_city_scale(train_df)
-    print("City demand scales:")
-    print(city_scale)
 
     # Normalize targets by city scale
     scale_map = city_scale.set_index("city")["city_demand_scale"]

@@ -32,7 +32,6 @@ def clean_rides(df: pd.DataFrame) -> pd.DataFrame:
     out = out.dropna(subset=["start_station_id"])
 
     if "start_lat" in out.columns and "start_lng" in out.columns:
-        # Only drop rows with missing coords if coords exist for at least some rows
         has_any_coords = out[["start_lat", "start_lng"]].notna().any().all()
         if has_any_coords:
             out = out.dropna(subset=["start_lat", "start_lng"])
@@ -136,14 +135,11 @@ def build_features(df: pd.DataFrame, medians: dict,
 
     city_fallback = temp["city_hour_mean"].fillna(global_fallback).fillna(1.5)
 
-    # Shrinkage: blend station mean toward city mean for low-count stations
-    # smoothed = (n * station_mean + k * city_mean) / (n + k)
-    SHRINKAGE_K = 10
-    n = temp["station_hour_count"].fillna(0)
-    station_raw = temp["station_hour_mean"]
-    smoothed = (n * station_raw + SHRINKAGE_K * city_fallback) / (n + SHRINKAGE_K)
-
-    features["station_hour_mean"] = smoothed.fillna(city_fallback)
+    features["station_hour_mean"] = (
+        temp["station_hour_mean"]
+        .fillna(city_fallback)
+        .fillna(1.5)
+    )
     features["city_hour_mean"] = city_fallback
     features["global_hour_mean"] = global_fallback.fillna(1.5)
     features["station_is_known"] = temp["station_hour_mean"].notna().astype(float)
@@ -220,3 +216,35 @@ def build_features(df: pd.DataFrame, medians: dict,
     # Drop helper columns
     features = features.drop(columns=["hour_of_day", "day_of_week"])
     return features
+
+def fill_zeros(demand: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each (city, station), generate a row for every hour
+    in that station's active date range, filling missing hours with demand=0.
+    Only fills hours within EVAL_HOURS.
+    """
+    filled_frames = []
+    for (city, station), group in demand.groupby(["city", "start_station_id"]):
+        min_hour = group["hour_ts"].min()
+        max_hour = group["hour_ts"].max()
+
+        all_hours = pd.date_range(start=min_hour, end=max_hour, freq="h")
+        all_hours = pd.DatetimeIndex([h for h in all_hours if h.hour in EVAL_HOURS])
+
+        full = pd.DataFrame({
+            "city": city,
+            "start_station_id": station,
+            "hour_ts": all_hours,
+        })
+
+        full = full.merge(group, on=["city", "start_station_id", "hour_ts"], how="left")
+        full["demand"] = full["demand"].fillna(0).astype(int)
+
+        feature_cols = [c for c in group.columns
+                       if c not in ["city", "start_station_id", "hour_ts", "demand"]]
+        if feature_cols:
+            full[feature_cols] = full[feature_cols].ffill().bfill()
+
+        filled_frames.append(full)
+
+    return pd.concat(filled_frames, ignore_index=True)
