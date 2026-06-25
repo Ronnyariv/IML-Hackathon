@@ -1,77 +1,89 @@
 #!/usr/bin/env python3
-"""
-Training script for the bike-demand submission.
-
-Run from this folder:
-
-    cd submissions/YOUR_TEAM_NAME
-    python train.py
-
-Expected dataset:
-
-    ../../dataset/train_set.csv
-
-Output:
-
-    weights.joblib
-
-The evaluator will later load weights.joblib through predict.py.
-"""
-
 from pathlib import Path
-
 import joblib
 import pandas as pd
-from model import BikeDemandModel, aggregate_demand, fill_zeros
-
-TRAIN_CSV = "/Users/mikasagi/Desktop/IML/Hackathon/IML-Hackathon/dataset/local_train_set.csv"
-USE_ZEROS = False
-
-df = pd.read_csv(TRAIN_CSV)
-demand = aggregate_demand(df)
-
-if USE_ZEROS:
-    demand = fill_zeros(demand)
-
+import matplotlib.pyplot as plt
+import lightgbm as lgb
+from preprocessing import clean_rides, aggregate_demand, compute_feature_medians, build_features
+from model import build_station_hour_means
 
 DATA_ROOT = Path("../../dataset")
-TRAIN_CSV = DATA_ROOT / "train_set.csv"
+TRAIN_CSV = DATA_ROOT / "local_train_set.csv"
 OUTPUT_WEIGHTS = "weights.joblib"
-"""note"""
+TRAINING_WEEKS = 8
 
+def take_first_n_weeks(city_df, n_weeks):
+    min_date = city_df["hour_ts"].min()
+    cutoff = min_date + pd.Timedelta(weeks=n_weeks)
+    return city_df[city_df["hour_ts"] < cutoff]
+
+def build_city_hour_means(train_df):
+    train_df = train_df.copy()
+    train_df["hour_of_day"] = pd.to_datetime(train_df["hour_ts"]).dt.hour
+    train_df["day_of_week"] = pd.to_datetime(train_df["hour_ts"]).dt.dayofweek
+    return (
+        train_df.groupby(["city", "hour_of_day", "day_of_week"])["demand"]
+        .mean()
+        .reset_index()
+        .rename(columns={"demand": "city_hour_mean"})
+    )
 
 def main() -> None:
-    train = pd.read_csv(TRAIN_CSV, low_memory=False)
+    print(f"Loading data from {TRAIN_CSV}...")
+    raw = pd.read_csv(TRAIN_CSV, low_memory=False)
 
-    # TODO: Create your training features.
-    # Example:
-    # X_train = create_features(train)
+    print("Cleaning rides...")
+    cleaned = clean_rides(raw)
+    cleaned["hour_ts"] = pd.to_datetime(cleaned["hour_ts"])
 
-    # TODO: Create your training target.
-    # Example:
-    # y_train = train["demand"]
+    # Progressive data release
+    city1 = cleaned[cleaned["city"] == "city 1"]
+    city2 = cleaned[cleaned["city"] == "city 2"]
+    city1_partial = take_first_n_weeks(city1, TRAINING_WEEKS)
+    city2_partial = take_first_n_weeks(city2, TRAINING_WEEKS)
+    cleaned = pd.concat([city1_partial, city2_partial])
+    print(f"Training on {TRAINING_WEEKS} weeks: {len(cleaned):,} rows")
 
-    # TODO: Train your model.
-    # Example:
-    # model.fit(X_train, y_train)
+    print("Computing feature medians...")
+    medians = compute_feature_medians(cleaned)
 
-    # TODO: Save every object needed later during prediction.
-    # This can include:
-    #   - trained model
-    #   - feature column names
-    #   - scalers / encoders
-    #   - lookup tables
-    #   - medians / fallback values
+    print("Aggregating demand...")
+    train_df = aggregate_demand(cleaned)
+
+    print("Building station-hour historical means...")
+    station_means = build_station_hour_means(train_df)
+    city_means = build_city_hour_means(train_df)
+
+    print("Building features...")
+    X_train = build_features(train_df, medians, station_means, city_means)
+    y_train = train_df["demand"]
+
+    print(f"Training LightGBM on {len(X_train):,} station-hour examples...")
+    model = lgb.LGBMRegressor(
+        num_leaves=31,
+        n_estimators=500,
+        min_child_samples=20,
+        learning_rate=0.01,
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train, y_train)
+
+    lgb.plot_importance(model, max_num_features=10)
+    plt.tight_layout()
+    plt.savefig("feature_importance.png")
+    print("Saved feature_importance.png")
 
     artifacts = {
-        "model": None,
-        "feature_columns": [],
+        "model": model,
+        "medians": medians,
+        "station_means": station_means,
+        "city_means": city_means,
+        "feature_columns": list(X_train.columns),
     }
 
     joblib.dump(artifacts, OUTPUT_WEIGHTS)
-
     print(f"Saved {OUTPUT_WEIGHTS}")
-
 
 if __name__ == "__main__":
     main()
