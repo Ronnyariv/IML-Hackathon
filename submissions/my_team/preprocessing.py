@@ -98,7 +98,8 @@ def fix_features(df: pd.DataFrame, medians: dict) -> pd.DataFrame:
 
 def build_features(df: pd.DataFrame, medians: dict,
                    station_means: pd.DataFrame,
-                   city_means: pd.DataFrame) -> pd.DataFrame:
+                   city_means: pd.DataFrame,
+                   global_means: pd.DataFrame = None) -> pd.DataFrame:
     """Builds base features and interaction terms for LightGBM."""
     df = fix_features(df, medians)
 
@@ -121,7 +122,7 @@ def build_features(df: pd.DataFrame, medians: dict,
         features["is_city_2"] = 0.0
         features["is_city_3"] = 0.0
 
-    # 3. Station and city historical means
+    # 3. Station → city → global → 1.0 fallback chain for historical means
     temp = df[["city", "start_station_id"]].copy()
     temp["start_station_id"] = _normalize_station_id(temp["start_station_id"])
     temp["hour_of_day"] = features["hour_of_day"]
@@ -133,10 +134,23 @@ def build_features(df: pd.DataFrame, medians: dict,
                       on=["city", "hour_of_day", "day_of_week"],
                       how="left")
 
-    features["station_hour_mean"] = temp["station_hour_mean"].fillna(
-        temp["city_hour_mean"]
-    ).fillna(1.0)
-    features["city_hour_mean"] = temp["city_hour_mean"].fillna(1.0)
+    if global_means is not None:
+        temp = temp.merge(global_means,
+                          on=["hour_of_day", "day_of_week"],
+                          how="left")
+        global_fallback = temp["global_hour_mean"]
+    else:
+        global_fallback = pd.Series(1.0, index=temp.index)
+
+    features["station_hour_mean"] = (
+        temp["station_hour_mean"]
+        .fillna(temp["city_hour_mean"])
+        .fillna(global_fallback)
+        .fillna(1.0)
+    )
+    features["city_hour_mean"] = temp["city_hour_mean"].fillna(global_fallback).fillna(1.0)
+    if global_means is not None:
+        features["global_hour_mean"] = global_fallback.fillna(1.0)
 
     # 4. Base numerical features
     base_cols = [

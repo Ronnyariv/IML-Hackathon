@@ -35,11 +35,21 @@ class BikeDemandModel:
         medians = self.artifacts["medians"]
         station_means = self.artifacts["station_means"]
         city_means = self.artifacts["city_means"]
+        global_means = self.artifacts.get("global_means", None)
+        city_scale = self.artifacts.get("city_scale", None)
         expected_cols = self.artifacts["feature_columns"]
 
-        X_test = build_features(test_df, medians, station_means, city_means)
+        X_test = build_features(test_df, medians, station_means, city_means, global_means)
         X_test = X_test[expected_cols]
 
         preds = model.predict(X_test)
+
+        # Reverse city-scale normalization applied during training
+        if city_scale is not None and "city" in test_df.columns:
+            scale_map = city_scale.set_index("city")["city_demand_scale"]
+            fallback = scale_map.mean()
+            scales = test_df["city"].map(scale_map).fillna(fallback).values
+            preds = preds * scales
+
         return np.maximum(0.0, preds)
 
