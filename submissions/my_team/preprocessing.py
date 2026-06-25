@@ -2,6 +2,18 @@ import numpy as np
 import pandas as pd
 
 EVAL_HOURS = set(range(6, 23))  # hours 6:00 through 22:00, matching the evaluator
+
+
+def _normalize_station_id(s: pd.Series) -> pd.Series:
+    """Convert numeric-looking IDs (101, 101.0, '101.0') to plain string ('101')."""
+    raw = s.astype(str).str.strip()
+    numeric = pd.to_numeric(raw, errors="coerce")
+    is_int_like = numeric.notna() & np.isfinite(numeric) & (numeric % 1 == 0)
+    out = raw.copy()
+    out[is_int_like] = numeric[is_int_like].astype("int64").astype(str)
+    return out
+
+
 MAX_RIDE_MINUTES = 1440
 
 _RIDE_ONLY_COLS = [
@@ -99,16 +111,18 @@ def build_features(df: pd.DataFrame, medians: dict,
     features["hour_of_day"] = features["hour"]
     features["day_of_week"] = features["weekday"]
 
-    # 2. City as one-hot
+    # 2. City as explicit boolean columns — stable regardless of which cities appear in df
     if "city" in df.columns:
-        city_dummies = pd.get_dummies(df["city"], prefix="city", drop_first=True)
-        for col in city_dummies.columns:
-            features[col] = city_dummies[col].astype(float)
+        features["is_city_2"] = (df["city"] == "city 2").astype(float)
+        features["is_city_3"] = (df["city"] == "city 3").astype(float)
     else:
-        features["city_city 2"] = 0.0
+        features["is_city_2"] = 0.0
+        features["is_city_3"] = 0.0
 
     # 3. Station historical mean — most powerful feature
+    # Normalize station IDs so "101", "101.0", and 101 all match the same entry.
     temp = df[["city", "start_station_id"]].copy()
+    temp["start_station_id"] = _normalize_station_id(temp["start_station_id"])
     temp["hour_of_day"] = features["hour_of_day"]
     temp["day_of_week"] = features["day_of_week"]
     temp = temp.merge(station_means,

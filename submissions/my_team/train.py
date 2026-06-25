@@ -9,6 +9,7 @@ from model import build_station_hour_means
 
 DATA_ROOT = Path("../../dataset")
 TRAIN_CSV = DATA_ROOT / "local_train_set.csv"
+VAL_CSV = DATA_ROOT / "local_validation_set.csv"
 OUTPUT_WEIGHTS = "weights.joblib"
 TRAINING_WEEKS = 8
 
@@ -58,16 +59,29 @@ def main() -> None:
     X_train = build_features(train_df, medians, station_means, city_means)
     y_train = train_df["demand"]
 
+    print("Loading and preparing validation set for early stopping...")
+    val_raw = pd.read_csv(VAL_CSV, low_memory=False)
+    val_cleaned = clean_rides(val_raw)
+    val_cleaned["hour_ts"] = pd.to_datetime(val_cleaned["hour_ts"])
+    val_df = aggregate_demand(val_cleaned)
+    X_val = build_features(val_df, medians, station_means, city_means)
+    X_val = X_val[list(X_train.columns)]
+    y_val = val_df["demand"]
+
     print(f"Training LightGBM on {len(X_train):,} station-hour examples...")
     model = lgb.LGBMRegressor(
         num_leaves=31,
-        n_estimators=500,
+        n_estimators=2000,
         min_child_samples=20,
         learning_rate=0.01,
         random_state=42,
         n_jobs=-1,
     )
-    model.fit(X_train, y_train)
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        callbacks=[lgb.early_stopping(50, verbose=True), lgb.log_evaluation(100)],
+    )
 
     lgb.plot_importance(model, max_num_features=10)
     plt.tight_layout()
