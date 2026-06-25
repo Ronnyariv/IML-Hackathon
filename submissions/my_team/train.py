@@ -55,16 +55,18 @@ def main() -> None:
     station_means = build_station_hour_means(train_df)
     city_means = build_city_hour_means(train_df)
 
-    print("\nCity means by city:")
-    print(city_means.groupby("city")["city_hour_mean"].describe())
-
     print("Building features...")
     X_train = build_features(train_df, medians, station_means, city_means)
     y_train = train_df["demand"]
 
-    print("\nFeature columns:", X_train.columns.tolist())
-    print("\nMeans comparison:")
-    print(X_train[["city_hour_mean", "station_hour_mean"]].describe())
+    print("Preparing validation set for early stopping...")
+    raw_val = pd.read_csv(VAL_CSV, low_memory=False)
+    cleaned_val = clean_rides(raw_val)
+    cleaned_val["hour_ts"] = pd.to_datetime(cleaned_val["hour_ts"])
+    val_df = aggregate_demand(cleaned_val)
+    X_val = build_features(val_df, medians, station_means, city_means)
+    y_val = val_df["demand"]
+    X_val = X_val.reindex(columns=X_train.columns, fill_value=0)
 
     print(f"Training LightGBM on {len(X_train):,} station-hour examples...")
     model = lgb.LGBMRegressor(
@@ -72,12 +74,14 @@ def main() -> None:
         n_estimators=2000,
         min_child_samples=20,
         learning_rate=0.01,
+        objective="mean_absolute_error",
         random_state=42,
         n_jobs=-1,
     )
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
+        eval_metric="mae",
         callbacks=[lgb.early_stopping(50, verbose=True), lgb.log_evaluation(100)],
     )
 
