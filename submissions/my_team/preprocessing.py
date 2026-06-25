@@ -27,14 +27,15 @@ STATION_FEATURE_COLS = [
     "temperature_2m", "rain", "precipitation", "cloud_cover", "wind_speed_10m"
 ]
 
-
 def clean_rides(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-
     out = out.dropna(subset=["start_station_id"])
 
     if "start_lat" in out.columns and "start_lng" in out.columns:
-        out = out.dropna(subset=["start_lat", "start_lng"])
+        # Only drop rows with missing coords if coords exist for at least some rows
+        has_any_coords = out[["start_lat", "start_lng"]].notna().any().all()
+        if has_any_coords:
+            out = out.dropna(subset=["start_lat", "start_lng"])
 
     if "usage_time_minutes" in out.columns:
         out = out[(out["usage_time_minutes"] > 0) & (out["usage_time_minutes"] <= MAX_RIDE_MINUTES)]
@@ -48,7 +49,6 @@ def clean_rides(df: pd.DataFrame) -> pd.DataFrame:
     out = out.drop(columns=cols_to_drop)
     return out.reset_index(drop=True)
 
-
 def aggregate_demand(df: pd.DataFrame) -> pd.DataFrame:
     """Convert raw ride-level data into station-hour demand while preserving features."""
     df["hour_ts"] = pd.to_datetime(df["hour_ts"])
@@ -61,16 +61,13 @@ def aggregate_demand(df: pd.DataFrame) -> pd.DataFrame:
         'restaurant_cafe_count_500m', 'transit_stop_count_500m', 'bike_lane_length_500m',
         'park_area_500m', 'university_count_1000m', 'distance_to_nearest_rail_station',
     ]
-
     actual_group_cols = [c for c in desired_group_cols if c in df.columns]
-
     demand = (
         df.groupby(actual_group_cols, dropna=False)
         .size()
         .reset_index(name="demand")
     )
     return demand
-
 
 def compute_feature_medians(df: pd.DataFrame) -> dict:
     medians = {}
@@ -83,7 +80,6 @@ def compute_feature_medians(df: pd.DataFrame) -> dict:
         medians[col] = float(series.median())
     return medians
 
-
 def fix_features(df: pd.DataFrame, medians: dict) -> pd.DataFrame:
     out = df.copy()
     if "distance_to_nearest_rail_station" in out.columns:
@@ -95,14 +91,12 @@ def fix_features(df: pd.DataFrame, medians: dict) -> pd.DataFrame:
             out[col] = out[col].fillna(fill_value)
     return out
 
-
 def build_features(df: pd.DataFrame, medians: dict,
                    station_means: pd.DataFrame,
                    city_means: pd.DataFrame,
                    global_means: pd.DataFrame = None) -> pd.DataFrame:
     """Builds base features and interaction terms for LightGBM."""
     df = fix_features(df, medians)
-
     if not pd.api.types.is_datetime64_any_dtype(df["hour_ts"]):
         df["hour_ts"] = pd.to_datetime(df["hour_ts"])
 
@@ -114,7 +108,7 @@ def build_features(df: pd.DataFrame, medians: dict,
     features["hour_of_day"] = features["hour"]
     features["day_of_week"] = features["weekday"]
 
-    # 2. City as explicit boolean columns
+    # 2. City flags
     if "city" in df.columns:
         features["is_city_2"] = (df["city"] == "city 2").astype(float)
         features["is_city_3"] = (df["city"] == "city 3").astype(float)
@@ -122,7 +116,7 @@ def build_features(df: pd.DataFrame, medians: dict,
         features["is_city_2"] = 0.0
         features["is_city_3"] = 0.0
 
-    # 3. Station → city → global → 1.0 fallback chain for historical means
+    # 3. Historical means with fallback chain: station → city → global → 1.5
     temp = df[["city", "start_station_id"]].copy()
     temp["start_station_id"] = _normalize_station_id(temp["start_station_id"])
     temp["hour_of_day"] = features["hour_of_day"]
@@ -135,22 +129,24 @@ def build_features(df: pd.DataFrame, medians: dict,
                       how="left")
 
     if global_means is not None:
-        temp = temp.merge(global_means,
-                          on=["hour_of_day", "day_of_week"],
-                          how="left")
+        temp = temp.merge(global_means, on=["hour_of_day", "day_of_week"], how="left")
         global_fallback = temp["global_hour_mean"]
     else:
-        global_fallback = pd.Series(1.0, index=temp.index)
+        global_fallback = pd.Series(1.5, index=temp.index)
 
     features["station_hour_mean"] = (
         temp["station_hour_mean"]
         .fillna(temp["city_hour_mean"])
         .fillna(global_fallback)
-        .fillna(1.0)
+        .fillna(1.5)
     )
-    features["city_hour_mean"] = temp["city_hour_mean"].fillna(global_fallback).fillna(1.0)
-    if global_means is not None:
-        features["global_hour_mean"] = global_fallback.fillna(1.0)
+    features["city_hour_mean"] = (
+        temp["city_hour_mean"]
+        .fillna(global_fallback)
+        .fillna(1.5)
+    )
+    features["global_hour_mean"] = global_fallback.fillna(1.5)
+    features["station_is_known"] = temp["station_hour_mean"].notna().astype(float)
 
     # 4. Base numerical features
     base_cols = [
@@ -176,7 +172,7 @@ def build_features(df: pd.DataFrame, medians: dict,
         features["is_morning_rush"] | features["is_evening_rush"]
     ).astype(int)
 
-    # 6. Existing interaction terms
+    # 6. Interaction terms
     features["rush_hour_workday"] = features["is_rush_hour"] * features["working_day"]
     features["temp_x_working_day"] = features["temperature_2m"] * features["working_day"]
     features["temp_x_weekend"] = features["temperature_2m"] * features["weekend"]
@@ -202,7 +198,6 @@ def build_features(df: pd.DataFrame, medians: dict,
     features["campus_score"] = features["university_count_1000m"]
     features["centrality_score"] = 1 / (1 + features["distance_to_city_center"])
     features["rail_closeness"] = 1 / (1 + features["distance_to_nearest_rail_station"])
-
     features["commuter_x_morning"] = features["commuter_score"] * features["is_morning_rush"]
     features["commuter_x_evening"] = features["commuter_score"] * features["is_evening_rush"]
     features["leisure_x_weekend"] = features["leisure_score"] * features["weekend"]
@@ -217,14 +212,11 @@ def build_features(df: pd.DataFrame, medians: dict,
     features["temp_comfort"] = features["temperature_2m"].sub(22).abs()
     features["temp_squared"] = features["temperature_2m"] ** 2
     features["bad_weather"] = (
-        features["has_rain"]
-        | features["heavy_rain"]
-        | features["strong_wind"]
+        features["has_rain"] | features["heavy_rain"] | features["strong_wind"]
     ).astype(int)
     features["bad_weather_x_rush"] = features["bad_weather"] * features["is_rush_hour"]
     features["bad_weather_x_weekend"] = features["bad_weather"] * features["weekend"]
 
     # Drop helper columns
     features = features.drop(columns=["hour_of_day", "day_of_week"])
-
     return features

@@ -10,6 +10,7 @@ from model import build_station_hour_means
 DATA_ROOT = Path("../../dataset")
 TRAIN_CSV = DATA_ROOT / "local_train_set.csv"
 VAL_CSV = DATA_ROOT / "local_validation_set.csv"
+CITY3_CSV = DATA_ROOT / "city3_generalization.csv"
 OUTPUT_WEIGHTS = "weights.joblib"
 TRAINING_WEEKS = 8
 
@@ -29,6 +30,25 @@ def build_city_hour_means(train_df):
         .rename(columns={"demand": "city_hour_mean"})
     )
 
+def build_global_hour_means(train_df):
+    df = train_df.copy()
+    df["hour_of_day"] = pd.to_datetime(df["hour_ts"]).dt.hour
+    df["day_of_week"] = pd.to_datetime(df["hour_ts"]).dt.dayofweek
+    return (
+        df.groupby(["hour_of_day", "day_of_week"])["demand"]
+        .mean()
+        .reset_index()
+        .rename(columns={"demand": "global_hour_mean"})
+    )
+
+def compute_city_scale(train_df):
+    return (
+        train_df.groupby("city")["demand"]
+        .mean()
+        .reset_index()
+        .rename(columns={"demand": "city_demand_scale"})
+    )
+
 def main() -> None:
     print(f"Loading data from {TRAIN_CSV}...")
     raw = pd.read_csv(TRAIN_CSV, low_memory=False)
@@ -37,7 +57,6 @@ def main() -> None:
     cleaned = clean_rides(raw)
     cleaned["hour_ts"] = pd.to_datetime(cleaned["hour_ts"])
 
-    # Progressive data release
     city1 = cleaned[cleaned["city"] == "city 1"]
     city2 = cleaned[cleaned["city"] == "city 2"]
     city1_partial = take_first_n_weeks(city1, TRAINING_WEEKS)
@@ -69,16 +88,14 @@ def main() -> None:
     y_val = val_df["demand"]
     X_val = X_val.reindex(columns=X_train.columns, fill_value=0)
 
-    # Compute city scale
+    # Compute city scales
     city_scale = compute_city_scale(train_df)
     print("City demand scales:")
     print(city_scale)
 
-    # Normalize training target
+    # Normalize targets by city scale
     scale_map = city_scale.set_index("city")["city_demand_scale"]
     y_train_normalized = y_train / train_df["city"].map(scale_map).values
-
-    # Normalize validation target too
     y_val_normalized = y_val / val_df["city"].map(scale_map).fillna(scale_map.mean()).values
 
     print(f"Training LightGBM on {len(X_train):,} station-hour examples...")
@@ -92,8 +109,8 @@ def main() -> None:
         n_jobs=-1,
     )
     model.fit(
-        X_train, y_train_normalized,  
-        eval_set=[(X_val, y_val_normalized)],  
+        X_train, y_train_normalized,
+        eval_set=[(X_val, y_val_normalized)],
         eval_metric="mae",
         callbacks=[lgb.early_stopping(50, verbose=True), lgb.log_evaluation(100)],
     )
@@ -109,31 +126,12 @@ def main() -> None:
         "station_means": station_means,
         "city_means": city_means,
         "global_means": global_means,
-        "city_scale": city_scale,              # ← add
+        "city_scale": city_scale,
         "feature_columns": list(X_train.columns),
     }
 
     joblib.dump(artifacts, OUTPUT_WEIGHTS)
     print(f"Saved {OUTPUT_WEIGHTS}")
-
-def compute_city_scale(train_df):
-    return (
-        train_df.groupby("city")["demand"]
-        .mean()
-        .reset_index()
-        .rename(columns={"demand": "city_demand_scale"})
-    )
-
-def build_global_hour_means(train_df):
-    df = train_df.copy()
-    df["hour_of_day"] = pd.to_datetime(df["hour_ts"]).dt.hour
-    df["day_of_week"] = pd.to_datetime(df["hour_ts"]).dt.dayofweek
-    return (
-        df.groupby(["hour_of_day", "day_of_week"])["demand"]
-        .mean()
-        .reset_index()
-        .rename(columns={"demand": "global_hour_mean"})
-    )
 
 if __name__ == "__main__":
     main()
