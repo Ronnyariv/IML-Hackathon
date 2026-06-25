@@ -10,9 +10,8 @@ def build_station_hour_means(train_df):
     df["start_station_id"] = _normalize_station_id(df["start_station_id"])
     return (
         df.groupby(["city", "start_station_id", "hour_of_day", "day_of_week"])["demand"]
-        .mean()
+        .agg(station_hour_mean="mean", station_hour_count="count")
         .reset_index()
-        .rename(columns={"demand": "station_hour_mean"})
     )
 
 class BikeDemandModel:

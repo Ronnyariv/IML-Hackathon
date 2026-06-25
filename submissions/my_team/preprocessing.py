@@ -134,17 +134,17 @@ def build_features(df: pd.DataFrame, medians: dict,
     else:
         global_fallback = pd.Series(1.5, index=temp.index)
 
-    features["station_hour_mean"] = (
-        temp["station_hour_mean"]
-        .fillna(temp["city_hour_mean"])
-        .fillna(global_fallback)
-        .fillna(1.5)
-    )
-    features["city_hour_mean"] = (
-        temp["city_hour_mean"]
-        .fillna(global_fallback)
-        .fillna(1.5)
-    )
+    city_fallback = temp["city_hour_mean"].fillna(global_fallback).fillna(1.5)
+
+    # Shrinkage: blend station mean toward city mean for low-count stations
+    # smoothed = (n * station_mean + k * city_mean) / (n + k)
+    SHRINKAGE_K = 10
+    n = temp["station_hour_count"].fillna(0)
+    station_raw = temp["station_hour_mean"]
+    smoothed = (n * station_raw + SHRINKAGE_K * city_fallback) / (n + SHRINKAGE_K)
+
+    features["station_hour_mean"] = smoothed.fillna(city_fallback)
+    features["city_hour_mean"] = city_fallback
     features["global_hour_mean"] = global_fallback.fillna(1.5)
     features["station_is_known"] = temp["station_hour_mean"].notna().astype(float)
 
